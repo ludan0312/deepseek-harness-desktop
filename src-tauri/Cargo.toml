@@ -1,0 +1,26 @@
+[package]
+name = "deepseek-harness"
+version = "1.0.0"
+description = "DeepSeekHarness Desktop Application"
+authors = ["you"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.70"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = [ "window-minimize", "window-start-dragging", "window-unminimize", "window-maximize", "window-unmaximize", "system-tray", "shell-open", "window-close", "window-hide", "window-show"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["process", "time", "rt-multi-thread"] }
+reqwest = { version = "0.11", features = ["blocking"] }
+anyhow = "1.0"
+dirs = "5.0"
+rfd = "0.14"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
