@@ -1,4 +1,4 @@
-# Logs
+﻿# Logs
 logs
 *.log
 npm-debug.log*
@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# Editor directories and files
+# Editor
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -23,6 +23,5 @@ dist-ssr
 *.sln
 *.sw?
 
-# Tauri
-/src-tauri/target
-/src-tauri/gen
+# Rust
+target

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{CustomMenuItem, Manager, SystemTray, SystemTrayEvent, SystemTrayMenu, SystemTrayMenuItem, WindowEvent};
+use tauri::{api::dialog::ask, CustomMenuItem, Manager, SystemTray, SystemTrayEvent, SystemTrayMenu, SystemTrayMenuItem, WindowEvent};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -9,16 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-// Windows 专用：隐藏子进程窗口
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-// ============================================
-// 配置区
-// ============================================
 const DSH_URL: &str = "http://127.0.0.1:3080";
 const CHECK_INTERVAL_MS: u64 = 1000;
 const STARTUP_TIMEOUT_S: u64 = 60;
@@ -30,9 +26,10 @@ struct AppState {
     dsh_dir: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct Config {
     dsh_dir: String,
+    close_action: Option<String>,
 }
 
 fn get_config_path() -> PathBuf {
@@ -64,13 +61,16 @@ fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 fn ensure_dsh_dir() -> String {
     if let Some(config) = load_config() {
-        if std::path::Path::new(&config.dsh_dir).exists() {
+        if !config.dsh_dir.is_empty() && std::path::Path::new(&config.dsh_dir).exists() {
             return config.dsh_dir;
         }
     }
 
     if std::path::Path::new(DEFAULT_DSH_DIR).exists() {
-        let config = Config { dsh_dir: DEFAULT_DSH_DIR.to_string() };
+        let config = Config {
+            dsh_dir: DEFAULT_DSH_DIR.to_string(),
+            ..Default::default()
+        };
         let _ = save_config(&config);
         return DEFAULT_DSH_DIR.to_string();
     }
@@ -82,12 +82,34 @@ fn ensure_dsh_dir() -> String {
     match selected {
         Some(path) => {
             let path_str = path.to_string_lossy().to_string();
-            let config = Config { dsh_dir: path_str.clone() };
+            let config = Config {
+                dsh_dir: path_str.clone(),
+                ..Default::default()
+            };
             let _ = save_config(&config);
             path_str
         }
         None => DEFAULT_DSH_DIR.to_string(),
     }
+}
+
+/// 杀掉进程及其子进程（Windows 用 taskkill /T 杀进程树）
+fn kill_process_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(&["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn main() {
@@ -121,10 +143,70 @@ fn main() {
             });
 
             let window_for_close = window.clone();
+            let state_for_close = state.inner().clone();
+            let app_handle_for_close = app_handle.clone();
+
             window.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    window_for_close.hide().unwrap();
                     api.prevent_close();
+
+                    let config = load_config();
+                    let close_action = config.as_ref().and_then(|c| c.close_action.clone());
+
+                    match close_action.as_deref() {
+                        None => {
+                            // 首次关闭：隐藏窗口并弹窗询问
+                            let _ = window_for_close.hide();
+
+                            let state = state_for_close.clone();
+                            let app_handle = app_handle_for_close.clone();
+
+                            ask(
+                                Some(&window_for_close),
+                                "关闭确认",
+                                "请选择关闭行为：\n\n点击「是」→ 最小化到系统托盘（推荐，后台运行）\n点击「否」→ 直接退出应用",
+                                move |result| {
+                                    if result {
+                                        // 选择托盘
+                                        let mut cfg = load_config().unwrap_or_default();
+                                        cfg.close_action = Some("tray".to_string());
+                                        let _ = save_config(&cfg);
+                                    } else {
+                                        // 选择退出
+                                        let mut cfg = load_config().unwrap_or_default();
+                                        cfg.close_action = Some("exit".to_string());
+                                        let _ = save_config(&cfg);
+
+                                        // 杀掉 DSH 进程树
+                                        tauri::async_runtime::block_on(async {
+                                            let mut process = state.dsh_process.lock().await;
+                                            if let Some(mut child) = process.take() {
+                                                kill_process_tree(&mut child);
+                                            }
+                                        });
+
+                                        app_handle.exit(0);
+                                    }
+                                }
+                            );
+                        }
+                        Some("tray") => {
+                            let _ = window_for_close.hide();
+                        }
+                        Some("exit") => {
+                            let _ = window_for_close.hide();
+                            tauri::async_runtime::block_on(async {
+                                let mut process = state_for_close.dsh_process.lock().await;
+                                if let Some(mut child) = process.take() {
+                                    kill_process_tree(&mut child);
+                                }
+                            });
+                            std::process::exit(0);
+                        }
+                        _ => {
+                            let _ = window_for_close.hide();
+                        }
+                    }
                 }
             });
 
@@ -168,7 +250,10 @@ fn main() {
                                     .pick_folder();
                                 if let Some(path) = selected {
                                     let path_str = path.to_string_lossy().to_string();
-                                    let config = Config { dsh_dir: path_str.clone() };
+                                    let config = Config {
+                                        dsh_dir: path_str.clone(),
+                                        ..Default::default()
+                                    };
                                     let _ = save_config(&config);
                                     let _ = app_handle.restart();
                                 }
@@ -179,8 +264,7 @@ fn main() {
                             tauri::async_runtime::block_on(async {
                                 let mut process = state.dsh_process.lock().await;
                                 if let Some(mut child) = process.take() {
-                                    let _ = child.kill();
-                                    let _ = child.wait();
+                                    kill_process_tree(&mut child);
                                 }
                             });
                             std::process::exit(0);
@@ -206,8 +290,7 @@ async fn start_dsh_process(state: &AppState) {
     let mut process = state.dsh_process.lock().await;
 
     if let Some(mut old) = process.take() {
-        let _ = old.kill();
-        let _ = old.wait();
+        kill_process_tree(&mut old);
     }
 
     let mut cmd = Command::new("pnpm.cmd");
@@ -217,7 +300,6 @@ async fn start_dsh_process(state: &AppState) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // Windows: 隐藏 pnpm.cmd 弹出的命令行窗口
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -251,6 +333,9 @@ async fn check_and_start_dsh(state: AppState, app_handle: tauri::AppHandle) {
         }
 
         attempts += 1;
+        if attempts % 5 == 0 {
+            println!("[DSH Wrapper] 等待 DSH 启动... ({}/{})", attempts, max_attempts);
+        }
     }
 
     eprintln!("[DSH Wrapper] DSH 启动超时！");
@@ -269,6 +354,7 @@ async fn restart_dsh_service(state: AppState, app_handle: tauri::AppHandle) {
         }
         attempts += 1;
     }
+    eprintln!("[DSH Wrapper] DSH 重启超时！");
 }
 
 async fn load_dsh_ui(app_handle: &tauri::AppHandle) {
