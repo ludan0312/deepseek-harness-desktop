@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness"
-version = "1.0.1"
+version = "1.1.0"
 description = "DeepSeekHarness Desktop Application"
 authors = ["you"]
 license = "MIT"
@@ -15,8 +15,12 @@ tauri-build = { version = "1.5", features = [] }
 tauri = { version = "1.5", features = [ "dialog-all", "window-minimize", "window-unmaximize", "window-unminimize", "window-start-dragging", "window-maximize", "system-tray", "shell-open", "window-close", "window-hide", "window-show"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.35", features = ["process", "time", "rt-multi-thread"] }
-reqwest = { version = "0.11", features = ["blocking"] }
+# io-util 提供 BufReader/lines，用于逐行读取 DSH 启动日志并提取带 token 的访问地址
+tokio = { version = "1.35", features = ["process", "time", "rt-multi-thread", "io-util"] }
+# 只使用 async API，无需 blocking 特性
+reqwest = { version = "0.11", features = [] }
+# 从 DSH 启动日志中提取 http://127.0.0.1:3080/?token=xxx 形式的完整访问地址
+regex = "1"
 anyhow = "1.0"
 dirs = "5.0"
 rfd = "0.14"
